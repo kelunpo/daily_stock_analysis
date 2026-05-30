@@ -939,11 +939,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - 修复服务器 UI 报告选择问题：原因是多条记录共享同一 `query_id`，导致总是显示第一条。现改用 `analysis_history.id` 作为唯一标识
   - 历史详情、新闻接口及前端组件已全面适配 `record_id`
   - 新增后台轮询（每 30s）与页面可见性变更时静默刷新历史列表，确保 CLI 发起的分析完成后前端能及时同步，使用 `silent` 模式避免触发 loading 状态
-- 🐛 **美股指数实时行情与日线数据** (Issue #273)
-  - 修复 SPX、DJI、IXIC、NDX、VIX、RUT 等美股指数无法获取实时行情的问题
-  - 新增 `us_index_mapping` 模块，将用户输入（如 SPX）映射为 Yahoo Finance 符号（如 ^GSPC）
-  - 美股指数与美股股票日线数据直接路由至 YfinanceFetcher，避免遍历不支持的数据源
-  - 消除重复的美股识别逻辑，统一使用 `is_us_stock_code()` 函数
 
 ### 优化
 - 🎨 **首页输入栏与 Market Sentiment 布局对齐优化**

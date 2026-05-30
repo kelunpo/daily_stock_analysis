@@ -28,7 +28,6 @@ from src.data.stock_index_loader import get_index_stock_name
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
 from src.services.run_diagnostics import record_provider_run
 from .fundamental_adapter import AkshareFundamentalAdapter
-from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -81,21 +80,12 @@ def normalize_stock_code(stock_code: str) -> str:
     - '600519.SH'   -> '600519'   (strip .SH suffix)
     - '000001.SZ'   -> '000001'   (strip .SZ suffix)
     - '920748.BJ'   -> '920748'   (strip .BJ suffix, BSE)
-    - 'HK00700'     -> 'HK00700'  (keep HK prefix for HK stocks)
-    - '1810.HK'     -> 'HK01810'  (normalize HK suffix to canonical prefix form)
-    - 'AAPL'        -> 'AAPL'     (keep US stock ticker as-is)
 
     This function is applied at the DataProviderManager layer so that
-    all individual fetchers receive a clean 6-digit code (for A-shares/ETFs).
+    all individual fetchers receive a clean 6-digit code (for A-shares).
     """
     code = stock_code.strip()
     upper = code.upper()
-
-    # Normalize HK prefix to a canonical 5-digit form (e.g. hk1810 -> HK01810)
-    if upper.startswith('HK') and not upper.startswith('HK.'):
-        candidate = upper[2:]
-        if candidate.isdigit() and 1 <= len(candidate) <= 5:
-            return f"HK{candidate.zfill(5)}"
 
     # Strip SH/SZ prefix (e.g. SH600519 -> 600519)
     if upper.startswith(('SH', 'SZ')) and not upper.startswith('SH.') and not upper.startswith('SZ.'):
@@ -125,53 +115,12 @@ def normalize_stock_code(stock_code: str) -> str:
     # Strip .SH/.SZ/.BJ suffix (e.g. 600519.SH -> 600519, 920748.BJ -> 920748)
     if '.' in code:
         base, suffix = code.rsplit('.', 1)
-        if suffix.upper() == 'HK' and base.isdigit() and 1 <= len(base) <= 5:
-            return f"HK{base.zfill(5)}"
         if base.upper() in ('SH', 'SS', 'SZ', 'BJ') and suffix.isdigit():
             return suffix
         if suffix.upper() in ('SH', 'SZ', 'SS', 'BJ') and base.isdigit():
             return base
 
     return code
-
-
-ETF_PREFIXES = ("51", "52", "56", "58", "15", "16", "18")
-
-
-def _is_us_market(code: str) -> bool:
-    """判断是否为美股/美股指数代码（不含中文前后缀）。"""
-    from .us_index_mapping import is_us_stock_code, is_us_index_code
-
-    normalized = (code or "").strip().upper()
-    return is_us_index_code(normalized) or is_us_stock_code(normalized)
-
-
-def _is_hk_market(code: str) -> bool:
-    """
-    判定是否为港股代码。
-
-    支持 `HK00700` 及纯 5 位数字形式（A 股 ETF/股票常见为 6 位）。
-    """
-    normalized = (code or "").strip().upper()
-    if normalized.endswith(".HK"):
-        base = normalized[:-3]
-        return base.isdigit() and 1 <= len(base) <= 5
-    if normalized.startswith("HK"):
-        digits = normalized[2:]
-        return digits.isdigit() and 1 <= len(digits) <= 5
-    if normalized.isdigit() and len(normalized) == 5:
-        return True
-    return False
-
-
-def _is_etf_code(code: str) -> bool:
-    """判定 A 股 ETF 基金代码（保守规则）。"""
-    normalized = normalize_stock_code(code)
-    return (
-        normalized.isdigit()
-        and len(normalized) == 6
-        and normalized.startswith(ETF_PREFIXES)
-    )
 
 
 def _coerce_chip_metric(value: Any) -> Optional[float]:
@@ -204,11 +153,6 @@ def _is_meaningful_chip_distribution(chip: Any) -> bool:
 
 
 def _market_tag(code: str) -> str:
-    """返回市场标签: cn/us/hk."""
-    if _is_us_market(code):
-        return "us"
-    if _is_hk_market(code):
-        return "hk"
     return "cn"
 
 
@@ -332,7 +276,7 @@ class BaseFetcher(ABC):
         获取主要指数实时行情
 
         Args:
-            region: 市场区域，cn=A股 us=美股
+            region: 市场区域，cn=A股
 
         Returns:
             List[Dict]: 指数列表，每个元素为字典，包含:
@@ -565,14 +509,11 @@ class DataFetcherManager:
 
     _DAILY_MARKET_FETCHER_SUPPORT = {
         "EfinanceFetcher": {"cn"},
-        "AkshareFetcher": {"cn", "hk"},
-        "TushareFetcher": {"cn", "hk"},
+        "AkshareFetcher": {"cn"},
+        "TushareFetcher": {"cn"},
         "PytdxFetcher": {"cn"},
         "BaostockFetcher": {"cn"},
-        "YfinanceFetcher": {"cn", "hk", "us"},
-        "LongbridgeFetcher": {"hk", "us"},
-        "FinnhubFetcher": {"us"},
-        "AlphaVantageFetcher": {"us"},
+        "YfinanceFetcher": {"cn"},
     }
 
     def __init__(self, fetchers: Optional[List[BaseFetcher]] = None):
@@ -598,7 +539,6 @@ class DataFetcherManager:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
         self._fundamental_adapter = AkshareFundamentalAdapter()
-        self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
         self._tickflow_lock = RLock()
@@ -695,7 +635,7 @@ class DataFetcherManager:
         market: str,
     ) -> List[BaseFetcher]:
         """Skip built-in daily fetchers that are known not to support a market."""
-        if market not in {"cn", "hk", "us"}:
+        if market not in {"cn"}:
             return fetchers
 
         kept: List[BaseFetcher] = []
@@ -1041,7 +981,6 @@ class DataFetcherManager:
 
         优先级动态调整逻辑：
         - 如果配置了 TUSHARE_TOKEN：实例化 TushareFetcher，并按其内部逻辑提升优先级
-        - 如果配置了 Longbridge 凭据：实例化 LongbridgeFetcher 作为美股/港股兜底
         - 未配置的可选数据源不实例化，避免在批量拉取时反复探测无效源
         - 默认优先级：
           0. EfinanceFetcher (Priority 0) - 最高优先级
@@ -1057,7 +996,6 @@ class DataFetcherManager:
         from .pytdx_fetcher import PytdxFetcher
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
-        from .longbridge_fetcher import LongbridgeFetcher
         config = get_config()
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -1072,30 +1010,6 @@ class DataFetcherManager:
             optional_fetchers.append(TushareFetcher())  # 会根据 Token 配置自动调整优先级
         else:
             logger.debug("[数据源初始化] 跳过未配置的 TushareFetcher")
-
-        has_longbridge_creds = bool(
-            (getattr(config, "longbridge_app_key", None) or "").strip()
-            and (getattr(config, "longbridge_app_secret", None) or "").strip()
-            and (getattr(config, "longbridge_access_token", None) or "").strip()
-        )
-        if has_longbridge_creds:
-            optional_fetchers.append(LongbridgeFetcher())  # 长桥（美股/港股兜底，懒加载）
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 LongbridgeFetcher")
-
-        finnhub_api_key = (getattr(config, "finnhub_api_key", None) or "").strip()
-        if finnhub_api_key:
-            from .finnhub_fetcher import FinnhubFetcher
-            optional_fetchers.append(FinnhubFetcher())
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 FinnhubFetcher")
-
-        alphavantage_api_key = (getattr(config, "alphavantage_api_key", None) or "").strip()
-        if alphavantage_api_key:
-            from .alphavantage_fetcher import AlphaVantageFetcher
-            optional_fetchers.append(AlphaVantageFetcher())
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 AlphaVantageFetcher")
 
         # 初始化数据源列表
         self._ensure_concurrency_guards()
@@ -1154,7 +1068,6 @@ class DataFetcherManager:
         Raises:
             DataFetchError: 所有数据源都失败时抛出
         """
-        from .us_index_mapping import is_us_index_code, is_us_stock_code
 
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
@@ -1162,115 +1075,14 @@ class DataFetcherManager:
         fetchers = self._get_fetchers_snapshot()
         errors = []
         request_start = time.time()
-
-        # 快速路径：美股使用专用数据源路由；港股先过滤不支持港股日线的数据源
-        #   - 配置长桥凭据后: Longbridge 为首选, YFinance/AkShare 兜底
-        #   - 未配置长桥:     YFinance 为首选（美股）, 通用 fetcher 循环（港股）
-        #   - 美股指数:       始终 YFinance 为首选（Longbridge 不提供指数K线）
-        is_us_index = is_us_index_code(stock_code)
-        is_us = is_us_index or is_us_stock_code(stock_code)
-        is_hk = (not is_us) and _is_hk_market(stock_code)
-        if is_hk:
-            fetchers = self._filter_daily_fetchers_for_market(fetchers, "hk")
+        
         fetchers = self._filter_fetchers_by_capability(fetchers, capability="daily_data")
         total_fetchers = len(fetchers)
 
         if total_fetchers == 0:
-            market_label = "美股指数" if is_us_index else "美股" if is_us else "港股" if is_hk else "A股"
+            market_label = "A股"
             error_summary = f"{market_label} {stock_code} 获取失败:\n暂无可用数据源"
             logger.error(f"[数据源终止] {stock_code} 获取失败: {error_summary}")
-            raise DataFetchError(error_summary)
-
-        # 美股（含美股指数）使用专用路由；港股走下方通用数据源循环
-        # Failover chain: Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)
-        # When Longbridge preferred: Longbridge -> Finnhub -> AlphaVantage -> Yfinance
-        if is_us:
-            prefer_lb = self._longbridge_preferred(capability="daily_data") and not is_us_index
-            if is_us_index:
-                # 指数始终 YFinance 首选（Longbridge 不提供指数K线）
-                source_order = ["YfinanceFetcher", "FinnhubFetcher"]
-            elif prefer_lb:
-                source_order = ["LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher"]
-            else:
-                source_order = ["FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher", "LongbridgeFetcher"]
-            market_label = "美股指数" if is_us_index else "美股"
-
-            for order_index, src_name in enumerate(source_order):
-                fallback_to = (
-                    source_order[order_index + 1]
-                    if order_index + 1 < len(source_order)
-                    else None
-                )
-                for attempt, fetcher in enumerate(fetchers, start=1):
-                    if fetcher.name != src_name:
-                        continue
-                    attempt_start = time.time()
-                    try:
-                        role = "首选" if src_name == source_order[0] else "兜底"
-                        logger.info(
-                            f"[数据源尝试 {attempt}/{total_fetchers}] [{fetcher.name}] "
-                            f"{market_label} {stock_code} {role}路由..."
-                        )
-                        df = self._call_fetcher_method(
-                            fetcher,
-                            "get_daily_data",
-                            stock_code=stock_code,
-                            start_date=start_date,
-                            end_date=end_date,
-                            days=days,
-                        )
-                        if df is not None and not df.empty:
-                            duration_ms = int((time.time() - attempt_start) * 1000)
-                            record_provider_run(
-                                data_type="daily_data",
-                                provider=fetcher.name,
-                                operation="get_daily_data",
-                                success=True,
-                                latency_ms=duration_ms,
-                                record_count=len(df),
-                            )
-                            elapsed = time.time() - request_start
-                            logger.info(
-                                f"[数据源完成] {stock_code} 使用 [{fetcher.name}] 获取成功: "
-                                f"rows={len(df)}, elapsed={elapsed:.2f}s"
-                            )
-                            return df, fetcher.name
-                        duration_ms = int((time.time() - attempt_start) * 1000)
-                        record_provider_run(
-                            data_type="daily_data",
-                            provider=fetcher.name,
-                            operation="get_daily_data",
-                            success=False,
-                            latency_ms=duration_ms,
-                            error_type="empty",
-                            error_message="empty result",
-                            fallback_to=fallback_to,
-                            record_count=0,
-                        )
-                    except Exception as e:
-                        error_type, error_reason = summarize_exception(e)
-                        error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
-                        duration_ms = int((time.time() - attempt_start) * 1000)
-                        record_provider_run(
-                            data_type="daily_data",
-                            provider=fetcher.name,
-                            operation="get_daily_data",
-                            success=False,
-                            latency_ms=duration_ms,
-                            error_type=error_type,
-                            error_message=error_reason,
-                            fallback_to=fallback_to,
-                        )
-                        logger.warning(
-                            f"[数据源失败 {attempt}/{total_fetchers}] [{fetcher.name}] {stock_code}: "
-                            f"error_type={error_type}, reason={error_reason}"
-                        )
-                        errors.append(error_msg)
-                    break
-
-            error_summary = f"{market_label} {stock_code} 获取失败:\n" + "\n".join(errors)
-            elapsed = time.time() - request_start
-            logger.error(f"[数据源终止] {stock_code} 获取失败: elapsed={elapsed:.2f}s\n{error_summary}")
             raise DataFetchError(error_summary)
 
         for attempt, fetcher in enumerate(fetchers, start=1):
@@ -1438,12 +1250,11 @@ class DataFetcherManager:
         获取实时行情数据（自动故障切换）
         
         故障切换策略（按配置的优先级）：
-        1. 美股：使用 YfinanceFetcher.get_realtime_quote()
-        2. EfinanceFetcher.get_realtime_quote()
-        3. AkshareFetcher.get_realtime_quote(source="em")  - 东财
-        4. AkshareFetcher.get_realtime_quote(source="sina") - 新浪
-        5. AkshareFetcher.get_realtime_quote(source="tencent") - 腾讯
-        6. 返回 None（降级兜底）
+        1. EfinanceFetcher.get_realtime_quote()
+        2. AkshareFetcher.get_realtime_quote(source="em")  - 东财
+        3. AkshareFetcher.get_realtime_quote(source="sina") - 新浪
+        4. AkshareFetcher.get_realtime_quote(source="tencent") - 腾讯
+        5. 返回 None（降级兜底）
         
         Args:
             stock_code: 股票代码
@@ -1457,8 +1268,6 @@ class DataFetcherManager:
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
 
-        from .akshare_fetcher import _is_us_code
-        from .us_index_mapping import is_us_index_code
         from src.config import get_config
 
         config = get_config()
@@ -1468,49 +1277,6 @@ class DataFetcherManager:
             logger.debug(f"[实时行情] 功能已禁用，跳过 {stock_code}")
             return None
 
-        # ----------------------------------------------------------
-        # 美股 (指数 + 个股) / 港股 — 专用双源路由
-        #   配置长桥后: Longbridge 首选, YFinance/AkShare 补充
-        #   未配置长桥: YFinance/AkShare 首选, Longbridge 补充
-        #   美股指数:   始终 YFinance 首选（Longbridge 不提供指数行情）
-        # ----------------------------------------------------------
-        is_us_index = is_us_index_code(stock_code)
-        is_us = is_us_index or _is_us_code(stock_code)
-        is_hk = (not is_us) and _is_hk_market(stock_code)
-
-        if is_us or is_hk:
-            prefer_lb = self._longbridge_preferred() and not is_us_index
-            if is_us:
-                primary_src = "LongbridgeFetcher" if prefer_lb else "YfinanceFetcher"
-                secondary_src = "YfinanceFetcher" if prefer_lb else "LongbridgeFetcher"
-                market_label = "美股指数" if is_us_index else "美股"
-                primary_kw: dict = {}
-                secondary_kw: dict = {}
-            else:
-                primary_src = "LongbridgeFetcher" if prefer_lb else "AkshareFetcher"
-                secondary_src = "AkshareFetcher" if prefer_lb else "LongbridgeFetcher"
-                market_label = "港股"
-                primary_kw = {"source": "hk"} if primary_src == "AkshareFetcher" else {}
-                secondary_kw = {"source": "hk"} if secondary_src == "AkshareFetcher" else {}
-
-            primary_quote = self._try_fetcher_quote(stock_code, primary_src, **primary_kw)
-            if primary_quote is not None:
-                logger.info(f"[实时行情] {market_label} {stock_code} 成功获取 (来源: {primary_src})")
-            primary_quote = self._supplement_quote(
-                stock_code, primary_quote, secondary_src, **secondary_kw,
-            )
-            # 美股个股（非指数）尝试从 Finnhub/AlphaVantage 补充缺失字段
-            if is_us and not is_us_index and primary_quote is not None:
-                for extra_src in ["FinnhubFetcher", "AlphaVantageFetcher"]:
-                    primary_quote = self._supplement_quote(
-                        stock_code, primary_quote, extra_src,
-                    )
-            if primary_quote is not None:
-                return primary_quote
-            if log_final_failure:
-                logger.info(f"[实时行情] {market_label} {stock_code} 无可用数据源")
-            return None
-        
         # 获取配置的数据源优先级
         source_priority = [
             source.strip().lower()
@@ -1663,17 +1429,6 @@ class DataFetcherManager:
                     filled.append(f)
         return filled
 
-    def _longbridge_preferred(self, capability: str = "realtime_quote") -> bool:
-        """Return True when Longbridge keys are configured and available.
-
-        When True, non-A-share routing (US & HK) uses Longbridge as the
-        primary data source with Yfinance/AkShare as fallback.
-        """
-        return self._get_fetcher_by_name(
-            "LongbridgeFetcher",
-            capability=capability,
-        ) is not None
-
     def _try_fetcher_quote(self, stock_code: str, fetcher_name: str, **kw):
         """Try to get a realtime quote from a named fetcher; returns quote or None."""
         fetcher = self._get_fetcher_by_name(fetcher_name, capability="realtime_quote")
@@ -1747,10 +1502,6 @@ class DataFetcherManager:
         if q is not None:
             logger.info(f"[实时行情] {stock_code} 从 {fetcher_name} 获取成功 (独立数据源)")
         return q
-
-    def _supplement_from_longbridge(self, stock_code: str, primary_quote):
-        """Shortcut kept for backward-compat with A-share general loop."""
-        return self._supplement_quote(stock_code, primary_quote, "LongbridgeFetcher")
 
     def get_chip_distribution(self, stock_code: str):
         """
@@ -1866,13 +1617,8 @@ class DataFetcherManager:
                 return name
 
         # 3. 依次尝试各个数据源
-        from .akshare_fetcher import _is_us_code
-        is_us = _is_us_code(stock_code)
-        _US_CAPABLE_FETCHERS = {"YfinanceFetcher", "LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher"}
         for fetcher in self._get_fetchers_snapshot():
             if not hasattr(fetcher, 'get_stock_name'):
-                continue
-            if is_us and fetcher.name not in _US_CAPABLE_FETCHERS:
                 continue
             if not self._is_fetcher_available(fetcher, capability="stock_name"):
                 continue
@@ -2006,16 +1752,15 @@ class DataFetcherManager:
 
     def get_main_indices(self, region: str = "cn") -> List[Dict[str, Any]]:
         """获取主要指数实时行情（自动切换数据源）"""
-        if region == "cn":
-            tickflow_fetcher = self._get_tickflow_fetcher()
-            if tickflow_fetcher is not None:
-                try:
-                    data = tickflow_fetcher.get_main_indices(region=region)
-                    if data:
-                        logger.info("[TickFlowFetcher] 获取指数行情成功")
-                        return data
-                except Exception as e:
-                    logger.warning(f"[TickFlowFetcher] 获取指数行情失败: {e}")
+        tickflow_fetcher = self._get_tickflow_fetcher()
+        if tickflow_fetcher is not None:
+            try:
+                data = tickflow_fetcher.get_main_indices(region=region)
+                if data:
+                    logger.info("[TickFlowFetcher] 获取指数行情成功")
+                    return data
+            except Exception as e:
+                logger.warning(f"[TickFlowFetcher] 获取指数行情失败: {e}")
 
         for fetcher in self._fetchers:
             try:
@@ -2317,181 +2062,6 @@ class DataFetcherManager:
             **blocks,
         }
 
-    def _build_offshore_fundamental_context(
-        self,
-        stock_code: str,
-        market: str,
-        budget_seconds: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """HK/US fundamental aggregation via yfinance.
-
-        Mirrors :meth:`get_fundamental_context` but skips A-share-specific
-        blocks (capital_flow, dragon_tiger, sector rankings). belong_boards is
-        sourced from yfinance ``info.sector`` / ``info.industry``.
-
-        Cache, retry and fail-open semantics intentionally match the CN path so
-        upstream callers see the same shape regardless of market.
-        """
-        from src.config import get_config
-
-        config = get_config()
-        stage_timeout = float(
-            budget_seconds if budget_seconds is not None else config.fundamental_stage_timeout_seconds
-        )
-        stage_timeout = max(0.0, stage_timeout)
-        fetch_timeout = float(config.fundamental_fetch_timeout_seconds)
-        fetch_timeout = max(0.0, fetch_timeout)
-
-        cache_ttl = int(config.fundamental_cache_ttl_seconds)
-        cache_max_entries = max(0, int(getattr(config, "fundamental_cache_max_entries", 256)))
-        cache_key = self._get_fundamental_cache_key(stock_code, stage_timeout)
-        if cache_ttl > 0:
-            self._prune_fundamental_cache(cache_ttl, cache_max_entries)
-            with self._fundamental_cache_lock:
-                cache_item = self._fundamental_cache.get(cache_key)
-                if cache_item:
-                    age = time.time() - float(cache_item.get("ts", 0))
-                    if age <= cache_ttl:
-                        return cache_item.get("context", {})
-
-        result_ctx: Dict[str, Any] = {
-            "market": market,
-            "valuation": {},
-            "growth": {},
-            "earnings": {},
-            "institution": {},
-            "capital_flow": {},
-            "dragon_tiger": {},
-            "boards": {},
-            "belong_boards": [],
-            "coverage": {},
-            "source_chain": [],
-            "errors": [],
-        }
-        start_ts = time.time()
-
-        # Valuation: reuse realtime quote payload — yfinance returns pe/pb in the
-        # same shape as AkShare, so the existing block formatter still works.
-        valuation_timeout = min(fetch_timeout, stage_timeout) if stage_timeout > 0 else 0
-        if valuation_timeout > 0:
-            quote_payload, valuation_err, valuation_ms = self._run_with_retry(
-                lambda: self.get_realtime_quote(stock_code),
-                valuation_timeout,
-                "fundamental_valuation",
-            )
-        else:
-            quote_payload, valuation_err, valuation_ms = None, "fundamental stage timeout", 0
-        valuation_payload = {
-            "pe_ratio": getattr(quote_payload, "pe_ratio", None) if quote_payload else None,
-            "pb_ratio": getattr(quote_payload, "pb_ratio", None) if quote_payload else None,
-            "total_mv": getattr(quote_payload, "total_mv", None) if quote_payload else None,
-            "circ_mv": getattr(quote_payload, "circ_mv", None) if quote_payload else None,
-        }
-        valuation_status = self._infer_block_status(
-            valuation_payload,
-            "partial" if quote_payload is not None else "not_supported",
-        )
-        if valuation_status == "partial" and valuation_err and not self._has_meaningful_payload(valuation_payload):
-            valuation_status = "failed"
-        result_ctx["valuation"] = self._build_fundamental_block(
-            valuation_status,
-            valuation_payload,
-            self._normalize_source_chain(
-                [{"provider": "realtime_quote", "result": valuation_status, "duration_ms": valuation_ms}],
-                "realtime_quote",
-                valuation_status,
-                valuation_ms,
-            ),
-            [valuation_err] if valuation_err else [],
-        )
-
-        # Fundamental bundle via yfinance.
-        bundle_timeout = min(fetch_timeout, max(stage_timeout - (time.time() - start_ts), 0.0))
-        if bundle_timeout <= 0:
-            bundle_payload, bundle_err, bundle_ms = {}, "fundamental stage timeout", 0
-        else:
-            bundle_payload, bundle_err, bundle_ms = self._run_with_retry(
-                lambda: self._yfinance_fundamental_adapter.get_fundamental_bundle(stock_code),
-                bundle_timeout,
-                "fundamental_bundle_yfinance",
-            )
-        if not isinstance(bundle_payload, dict):
-            bundle_payload = {}
-
-        bundle_chain = self._normalize_source_chain(
-            bundle_payload.get("source_chain", []),
-            "fundamental_bundle_yfinance",
-            str(bundle_payload.get("status", "not_supported")),
-            bundle_ms,
-        )
-        adapter_errors = list(bundle_payload.get("errors", []))
-        if bundle_err:
-            adapter_errors.append(bundle_err)
-
-        growth_payload = bundle_payload.get("growth", {}) if isinstance(bundle_payload.get("growth"), dict) else {}
-        earnings_payload = bundle_payload.get("earnings", {}) if isinstance(bundle_payload.get("earnings"), dict) else {}
-        belong_boards = bundle_payload.get("belong_boards") if isinstance(bundle_payload.get("belong_boards"), list) else []
-
-        growth_status = self._infer_block_status(growth_payload, str(bundle_payload.get("status", "not_supported")))
-        earnings_status = self._infer_block_status(earnings_payload, str(bundle_payload.get("status", "not_supported")))
-
-        result_ctx["growth"] = self._build_fundamental_block(
-            growth_status,
-            growth_payload,
-            bundle_chain,
-            list(adapter_errors),
-        )
-        result_ctx["earnings"] = self._build_fundamental_block(
-            earnings_status,
-            earnings_payload,
-            bundle_chain,
-            list(adapter_errors),
-        )
-
-        # institution / capital_flow / dragon_tiger / boards: keep as not_supported
-        # for offshore markets — no equivalent data feed today.
-        for block in ("institution", "capital_flow", "dragon_tiger", "boards"):
-            result_ctx[block] = self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["not supported for offshore market"],
-            )
-
-        result_ctx["belong_boards"] = belong_boards
-
-        block_statuses = {
-            "valuation": result_ctx["valuation"].get("status", "not_supported"),
-            "growth": growth_status,
-            "earnings": earnings_status,
-            "institution": "not_supported",
-            "capital_flow": "not_supported",
-            "dragon_tiger": "not_supported",
-            "boards": "not_supported",
-        }
-        result_ctx["coverage"] = block_statuses
-        for block in ("valuation", "growth", "earnings", "institution", "capital_flow", "dragon_tiger", "boards"):
-            result_ctx["errors"].extend(result_ctx[block].get("errors", []))
-            result_ctx["source_chain"].extend(result_ctx[block].get("source_chain", []))
-
-        active_statuses = {"valuation": valuation_status, "growth": growth_status, "earnings": earnings_status}
-        if all(value == "not_supported" for value in active_statuses.values()):
-            result_ctx["status"] = "not_supported"
-        elif "failed" in active_statuses.values() or "partial" in active_statuses.values():
-            result_ctx["status"] = "partial"
-        else:
-            result_ctx["status"] = "ok"
-
-        result_ctx["elapsed_ms"] = int((time.time() - start_ts) * 1000)
-        if cache_ttl > 0 and self._should_cache_fundamental_context(result_ctx):
-            with self._fundamental_cache_lock:
-                self._fundamental_cache[cache_key] = {
-                    "ts": time.time(),
-                    "context": result_ctx,
-                }
-            self._prune_fundamental_cache(cache_ttl, cache_max_entries)
-        return result_ctx
-
     def build_failed_fundamental_context(self, stock_code: str, reason: str) -> Dict[str, Any]:
         """Build a consistent failed-context payload for caller-side fallback."""
         market = _market_tag(stock_code)
@@ -2541,13 +2111,6 @@ class DataFetcherManager:
 
         stock_code = normalize_stock_code(stock_code)
         market = _market_tag(stock_code)
-        is_etf = _is_etf_code(stock_code)
-        if market in {"us", "hk"}:
-            return self._build_offshore_fundamental_context(
-                stock_code,
-                market=market,
-                budget_seconds=budget_seconds,
-            )
 
         stage_timeout = float(
             budget_seconds if budget_seconds is not None else config.fundamental_stage_timeout_seconds
@@ -2739,48 +2302,26 @@ class DataFetcherManager:
             institution_errors,
         )
 
-        # capital flow
-        if is_etf:
-            result_ctx["capital_flow"] = self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["etf not fully supported"],
-            )
-            result_ctx["dragon_tiger"] = self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["etf not fully supported"],
-            )
-            result_ctx["boards"] = self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["etf not fully supported"],
-            )
-            result_ctx["status"] = "partial"
-        else:
-            capital_flow_budget = min(fetch_timeout, remaining_seconds)
-            capital_flow_start = time.time()
-            result_ctx["capital_flow"] = self.get_capital_flow_context(
-                stock_code,
-                budget_seconds=capital_flow_budget,
-            )
-            _consume_budget(int((time.time() - capital_flow_start) * 1000))
+        capital_flow_budget = min(fetch_timeout, remaining_seconds)
+        capital_flow_start = time.time()
+        result_ctx["capital_flow"] = self.get_capital_flow_context(
+            stock_code,
+            budget_seconds=capital_flow_budget,
+        )
+        _consume_budget(int((time.time() - capital_flow_start) * 1000))
 
-            dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
-            dragon_tiger_start = time.time()
-            result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
-                stock_code,
-                budget_seconds=dragon_tiger_budget,
-            )
-            _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
+        dragon_tiger_budget = min(fetch_timeout, remaining_seconds)
+        dragon_tiger_start = time.time()
+        result_ctx["dragon_tiger"] = self.get_dragon_tiger_context(
+            stock_code,
+            budget_seconds=dragon_tiger_budget,
+        )
+        _consume_budget(int((time.time() - dragon_tiger_start) * 1000))
 
-            result_ctx["boards"] = self.get_board_context(
-                stock_code,
-                budget_seconds=min(fetch_timeout, remaining_seconds),
-            )
+        result_ctx["boards"] = self.get_board_context(
+            stock_code,
+            budget_seconds=min(fetch_timeout, remaining_seconds),
+        )
 
         block_statuses = {
             "valuation": result_ctx["valuation"].get("status", "not_supported"),
@@ -2833,13 +2374,6 @@ class DataFetcherManager:
         config = get_config()
         stock_code = normalize_stock_code(stock_code)
         timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
-        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
-            return self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["not supported"],
-            )
 
         if timeout <= 0:
             return self._build_fundamental_block(
@@ -2897,13 +2431,6 @@ class DataFetcherManager:
         config = get_config()
         stock_code = normalize_stock_code(stock_code)
         timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
-        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
-            return self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["not supported"],
-            )
 
         if timeout <= 0:
             return self._build_fundamental_block(
@@ -2947,13 +2474,6 @@ class DataFetcherManager:
         config = get_config()
         stock_code = normalize_stock_code(stock_code)
         timeout = float(budget_seconds if budget_seconds is not None else config.fundamental_fetch_timeout_seconds)
-        if _market_tag(stock_code) != "cn" or _is_etf_code(stock_code):
-            return self._build_fundamental_block(
-                "not_supported",
-                {},
-                [{"provider": "fundamental_pipeline", "result": "not_supported", "duration_ms": 0}],
-                ["not supported"],
-            )
 
         if timeout <= 0:
             return self._build_fundamental_block(

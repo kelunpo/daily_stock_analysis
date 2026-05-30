@@ -31,7 +31,7 @@ from tenacity import (
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code, _is_hk_market
+from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS,is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
 from .realtime_types import UnifiedRealtimeQuote, ChipDistribution
 from src.config import get_config
 import os
@@ -46,30 +46,6 @@ logger = logging.getLogger(__name__)
 _ETF_SH_PREFIXES = ('51', '52', '56', '58')
 _ETF_SZ_PREFIXES = ('15', '16', '18')
 _ETF_ALL_PREFIXES = _ETF_SH_PREFIXES + _ETF_SZ_PREFIXES
-
-
-def _is_etf_code(stock_code: str) -> bool:
-    """
-    Check if the code is an ETF fund code.
-
-    ETF code ranges:
-    - Shanghai ETF: 51xxxx, 52xxxx, 56xxxx, 58xxxx
-    - Shenzhen ETF: 15xxxx, 16xxxx, 18xxxx
-    """
-    code = normalize_stock_code(stock_code)
-    return code.startswith(_ETF_ALL_PREFIXES) and len(code) == 6
-
-
-def _is_us_code(stock_code: str) -> bool:
-    """
-    判断代码是否为美股
-    
-    美股代码规则：
-    - 1-5个大写字母，如 'AAPL', 'TSLA'
-    - 可能包含 '.'，如 'BRK.B'
-    """
-    code = stock_code.strip().upper()
-    return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
 
 
 class _TushareHttpClient:
@@ -341,7 +317,7 @@ class TushareFetcher(BaseFetcher):
     
     def _convert_stock_code(self, stock_code: str) -> str:
         """
-        转换 A 股 / ETF / 北交所等为 Tushare ts_code（不含港股逻辑）。
+        转换 A 股 为 Tushare ts_code。
 
         Tushare 要求的格式示例：
         - 沪市股票：600519.SH
@@ -369,13 +345,6 @@ class TushareFetcher(BaseFetcher):
             if ts_code.endswith('.SS'):
                 return f"{ts_code[:-3]}.SH"
             return ts_code
-
-        if _is_us_code(raw_code):
-            raise DataFetchError(f"TushareFetcher 不支持美股 {raw_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
-
-        if _is_hk_market(raw_code):
-            #raise DataFetchError(f"TushareFetcher 不支持港股 {raw_code}，请使用 AkshareFetcher")
-            return normalize_stock_code(raw_code)
 
         code = normalize_stock_code(raw_code)
         exchange_hint = self._detect_exchange_hint(raw_code)
@@ -408,27 +377,6 @@ class TushareFetcher(BaseFetcher):
             logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
             return f"{code}.SZ"
 
-    def _convert_hk_stock_code_for_tushare(self, stock_code: str) -> str:
-        """
-        将用户输入转为 Tushare Pro 接口所需的 ts_code（含港股 nnnnn.HK）。
-
-        - 非港股：委托 _convert_stock_code（A 股 / ETF / 北交所等）。
-        - 港股：从 HK00700、00700、00700.HK 等形式归一为 5 位数字 + .HK。
-        """
-        raw_code = stock_code.strip()
-        if _is_hk_market(raw_code):
-            if "." in raw_code:
-                ts_code = raw_code.upper()
-                if ts_code.endswith(".SS"):
-                    return f"{ts_code[:-3]}.SH"
-                if ts_code.endswith(".HK"):
-                    return ts_code
-            digits = re.sub(r"\D", "", raw_code)
-            if not digits:
-                raise DataFetchError(f"无法识别港股代码 {raw_code}")
-            code = digits[-5:].rjust(5, "0")
-            return f"{code}.HK"
-        return self._convert_stock_code(stock_code)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -446,30 +394,18 @@ class TushareFetcher(BaseFetcher):
         
         流程：
         1. 检查 API 是否可用
-        2. 检查是否为美股（不支持）
-        3. 执行速率限制检查
-        4. 转换股票代码格式
-        5. 根据代码类型选择接口并调用
+        2. 执行速率限制检查
+        3. 转换股票代码格式
+        4. 根据代码类型选择接口并调用
         """
         if self._api is None:
             raise DataFetchError("Tushare API 未初始化，请检查 Token 配置")
         
-        # US stocks not supported
-        if _is_us_code(stock_code):
-            raise DataFetchError(f"TushareFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
-        
         # Rate-limit check
         self._check_rate_limit()
         
-        is_hk = _is_hk_market(stock_code)
-         # 判断是否为 ETF / 港股，以选择不同接口
-        is_etf = _is_etf_code(stock_code)
-        if is_hk:
-            ts_code = self._convert_hk_stock_code_for_tushare(stock_code)
-            api_name = "hk_daily"
-        else:
-            ts_code = self._convert_stock_code(stock_code)
-            api_name = "fund_daily" if is_etf else "daily"
+        ts_code = self._convert_stock_code(stock_code)
+        api_name = "daily"
         
         # Convert date format (Tushare requires YYYYMMDD)
         ts_start = start_date.replace('-', '')
@@ -480,27 +416,11 @@ class TushareFetcher(BaseFetcher):
         logger.debug(f"调用 Tushare {api_name}({ts_code}, {ts_start}, {ts_end})")
         
         try:
-            if is_hk:
-                # 港股使用 hk_daily 接口
-                df = self._api.hk_daily(
-                    ts_code=ts_code,
-                    start_date=ts_start,
-                    end_date=ts_end,
-                )
-            elif is_etf:
-                # ETF uses fund_daily interface
-                df = self._api.fund_daily(
-                    ts_code=ts_code,
-                    start_date=ts_start,
-                    end_date=ts_end,
-                )
-            else:
-                # Regular A-share stocks use daily interface
-                df = self._api.daily(
-                    ts_code=ts_code,
-                    start_date=ts_start,
-                    end_date=ts_end,
-                )
+            df = self._api.daily(
+                ts_code=ts_code,
+                start_date=ts_start,
+                end_date=ts_end,
+            )
             
             return df
             
@@ -528,10 +448,8 @@ class TushareFetcher(BaseFetcher):
         - vol 按「手」计，乘以 100 转为「股」
         - amount 按「千元」计，乘以 1000 转为「元」
 
-        港股 hk_daily 返回的 vol / amount 已是可直接使用的量级，不做上述缩放。
         """
         df = df.copy()
-        is_hk = _is_hk_market(stock_code)
 
         # 列名映射
         column_mapping = {
@@ -547,10 +465,10 @@ class TushareFetcher(BaseFetcher):
             df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
         
         # 成交量 / 成交额：仅 A 股类接口做单位换算（港股 hk_daily 不换算）
-        if 'volume' in df.columns and not is_hk:
+        if 'volume' in df.columns:
             df['volume'] = df['volume'] * 100
         
-        if 'amount' in df.columns and not is_hk:
+        if 'amount' in df.columns:
             df['amount'] = df['amount'] * 1000
         
         # 添加股票代码列
@@ -591,29 +509,12 @@ class TushareFetcher(BaseFetcher):
             # 速率限制检查
             self._check_rate_limit()
             
-
-            # 根据市场/类型选择基础信息接口
-            if _is_hk_market(stock_code):
-                ts_code = self._convert_hk_stock_code_for_tushare(stock_code)
-                # 港股：使用 hk_basic
-                df = self._api.hk_basic(
-                    ts_code=ts_code,
-                    fields='ts_code,name'
-                )
-            elif _is_etf_code(stock_code):
-                ts_code = self._convert_stock_code(stock_code)
-                # ETF：使用 fund_basic
-                df = self._api.fund_basic(
-                    ts_code=ts_code,
-                    fields='ts_code,name'
-                )
-            else:
-                ts_code = self._convert_stock_code(stock_code)
-                # A 股股票：使用 stock_basic
-                df = self._api.stock_basic(
-                    ts_code=ts_code,
-                    fields='ts_code,name'
-                )
+            ts_code = self._convert_stock_code(stock_code)
+            # A 股股票：使用 stock_basic
+            df = self._api.stock_basic(
+                ts_code=ts_code,
+                fields='ts_code,name'
+            )
             
             if df is not None and not df.empty:
                 name = df.iloc[0]['name']
@@ -682,11 +583,6 @@ class TushareFetcher(BaseFetcher):
             UnifiedRealtimeQuote 对象，失败返回 None
         """
         if self._api is None:
-            return None
-
-        # HK stocks not supported by Tushare
-        if _is_hk_market(stock_code):
-            logger.debug(f"TushareFetcher 跳过港股实时行情 {stock_code}")
             return None
 
         normalized_code = normalize_stock_code(stock_code)
@@ -1124,8 +1020,7 @@ class TushareFetcher(BaseFetcher):
         数据来源：ts.pro_api().cyq_chips()
         包含：获利比例、平均成本、筹码集中度
         
-        注意：ETF/指数没有筹码分布数据，会直接返回 None；港股不支持，直接返回 None。
-        5000积分以下每天访问15次,每小时访问5次
+        注意：5000积分以下每天访问15次,每小时访问5次
         
         Args:
             stock_code: 股票代码
@@ -1134,18 +1029,6 @@ class TushareFetcher(BaseFetcher):
             ChipDistribution 对象（最新交易日的数据），获取失败返回 None
 
         """
-        if _is_us_code(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持美股 {stock_code} 的筹码分布")
-            return None
-        
-        if _is_etf_code(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持 ETF {stock_code} 的筹码分布")
-            return None
-
-        if _is_hk_market(stock_code):
-            logger.warning(f"[Tushare] TushareFetcher 不支持港股 {stock_code} 的筹码分布")
-            return None
-        
         try:
             # 19点之后才有当天数据
             start_date = self.get_trade_time(early_time='00:00', late_time='19:00') 

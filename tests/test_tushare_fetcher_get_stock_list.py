@@ -188,13 +188,6 @@ class TestTushareFetcherFetchRawData(unittest.TestCase):
         self.assertEqual(fetcher._convert_stock_code("HK00700"), "HK00700")
     
 
-    def test_convert_stock_code_for_tushare_normalizes_hk(self) -> None:
-        fetcher = self._make_fetcher()
-        self.assertEqual(fetcher._convert_hk_stock_code_for_tushare("HK00700"), "00700.HK")
-        self.assertEqual(fetcher._convert_hk_stock_code_for_tushare("00700.HK"), "00700.HK")
-        self.assertEqual(fetcher._convert_hk_stock_code_for_tushare("600519"), "600519.SH")
-
-
 class TestTushareFetcherNormalizeData(unittest.TestCase):
     """TushareFetcher._normalize_data: A-share vol/amount scaling vs HK passthrough."""
 

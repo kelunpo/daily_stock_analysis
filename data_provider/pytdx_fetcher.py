@@ -36,7 +36,6 @@ from .base import (
     STANDARD_COLUMNS,
     is_bse_code,
     normalize_stock_code,
-    _is_hk_market,
 )
 import os
 
@@ -81,18 +80,6 @@ def _parse_hosts_from_env() -> Optional[List[Tuple[str, int]]]:
             logger.warning(f"Invalid PYTDX_HOST/PYTDX_PORT: {host}:{port_str}")
 
     return None
-
-
-def _is_us_code(stock_code: str) -> bool:
-    """
-    判断代码是否为美股
-    
-    美股代码规则：
-    - 1-5个大写字母，如 'AAPL', 'TSLA'
-    - 可能包含 '.'，如 'BRK.B'
-    """
-    code = stock_code.strip().upper()
-    return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
 
 
 class PytdxFetcher(BaseFetcher):
@@ -319,14 +306,7 @@ class PytdxFetcher(BaseFetcher):
         3. 判断市场代码
         4. 调用 API 获取 K 线数据
         """
-        # 美股不支持，抛出异常让 DataFetcherManager 切换到其他数据源
-        if _is_us_code(stock_code):
-            raise DataFetchError(f"PytdxFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
-
-        # 港股不支持，抛出异常让 DataFetcherManager 切换到其他数据源
-        if _is_hk_market(stock_code):
-            raise DataFetchError(f"PytdxFetcher 不支持港股 {stock_code}，请使用 AkshareFetcher")
-
+        
         # 北交所不支持，抛出异常让 DataFetcherManager 切换到其他数据源
         if is_bse_code(stock_code):
             raise DataFetchError(
@@ -418,9 +398,6 @@ class PytdxFetcher(BaseFetcher):
         Returns:
             股票名称，失败返回 None
         """
-        # 港股不支持（pytdx 不含港股数据）
-        if _is_hk_market(stock_code):
-            return None
 
         # 先检查缓存
         if stock_code in self._stock_name_cache:

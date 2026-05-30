@@ -32,7 +32,6 @@ from tenacity import (
     before_sleep_log,
 )
 
-from data_provider.us_index_mapping import is_us_index_code
 from src.config import (
     NEWS_STRATEGY_WINDOWS,
     normalize_news_strategy_profile,
@@ -2396,9 +2395,6 @@ class SearchService:
             return False
         # A-share ETF
         if code.isdigit() and len(code) == 6 and code.startswith(SearchService._A_ETF_PREFIXES):
-            return True
-        # US index (SPX, DJI, IXIC etc.)
-        if is_us_index_code(code):
             return True
         # US/HK ETF: foreign symbol + name contains fund-like keywords
         if SearchService._is_foreign_stock(code):

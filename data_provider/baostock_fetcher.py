@@ -35,24 +35,10 @@ from .base import (
     STANDARD_COLUMNS,
     is_bse_code,
     normalize_stock_code,
-    _is_hk_market,
 )
 import os
 
 logger = logging.getLogger(__name__)
-
-
-def _is_us_code(stock_code: str) -> bool:
-    """
-    判断代码是否为美股
-    
-    美股代码规则：
-    - 1-5个大写字母，如 'AAPL', 'TSLA'
-    - 可能包含 '.'，如 'BRK.B'
-    """
-    code = stock_code.strip().upper()
-    return bool(re.match(r'^[A-Z]{1,5}(\.[A-Z])?$', code))
-
 
 class BaostockFetcher(BaseFetcher):
     """
@@ -146,10 +132,6 @@ class BaostockFetcher(BaseFetcher):
         raw_code = stock_code.strip()
         upper = raw_code.upper()
 
-        # HK stocks are not supported by Baostock
-        if _is_hk_market(raw_code):
-            raise DataFetchError(f"BaostockFetcher 不支持港股 {raw_code}，请使用 AkshareFetcher")
-
         # 保留既有小写 baostock 格式输入的内部容错，但用户配置仍推荐 6 位裸代码。
         if raw_code.startswith(('sh.', 'sz.')):
             return raw_code.lower()
@@ -194,19 +176,11 @@ class BaostockFetcher(BaseFetcher):
         使用 query_history_k_data_plus() 获取日线数据
         
         流程：
-        1. 检查是否为美股（不支持）
-        2. 使用上下文管理器管理连接
-        3. 转换股票代码格式
-        4. 调用 API 查询数据
-        5. 将结果转换为 DataFrame
+        1. 使用上下文管理器管理连接
+        2. 转换股票代码格式
+        3. 调用 API 查询数据
+        4. 将结果转换为 DataFrame
         """
-        # 美股不支持，抛出异常让 DataFetcherManager 切换到其他数据源
-        if _is_us_code(stock_code):
-            raise DataFetchError(f"BaostockFetcher 不支持美股 {stock_code}，请使用 AkshareFetcher 或 YfinanceFetcher")
-
-        # 港股不支持，抛出异常让 DataFetcherManager 切换到其他数据源
-        if _is_hk_market(stock_code):
-            raise DataFetchError(f"BaostockFetcher 不支持港股 {stock_code}，请使用 AkshareFetcher")
 
         # 北交所不支持，抛出异常让 DataFetcherManager 切换到其他数据源
         if is_bse_code(stock_code):
